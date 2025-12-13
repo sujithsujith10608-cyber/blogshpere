@@ -56,7 +56,21 @@ function broadcastEvent(eventType, data) {
 global.broadcastEvent = broadcastEvent;
 
 // MongoDB Connection
-const mongoURI = process.env.MONGO_URI || 'mongodb://localhost:27017/fb';
+// Prefer `MONGODB_URI` (common name) but accept `MONGO_URI` for compatibility
+const mongoURI = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/fb';
+
+// Helper to mask credentials when logging the connection host
+function maskMongoURI(uri) {
+  try {
+    const url = new URL(uri.replace('mongodb+srv://', 'http://'));
+    // show only hostname and port/path, hide auth
+    return url.host + url.pathname;
+  } catch (e) {
+    return uri.replace(/:(?:[^@]+)@/, ':*****@');
+  }
+}
+
+console.log(`Using MongoDB URI host: ${maskMongoURI(mongoURI)}`);
 
 mongoose.connect(mongoURI, {
   useNewUrlParser: true,
@@ -67,6 +81,17 @@ mongoose.connect(mongoURI, {
 })
 .catch((err) => {
   console.error('MongoDB connection error:', err);
+
+  // Helpful troubleshooting hints for common connectivity issues
+  if (err.message && err.message.includes('ECONNREFUSED')) {
+    console.error('⚠️  Connection refused to MongoDB. Possible causes:');
+    console.error('   - `MONGODB_URI` (or `MONGO_URI`) not set in environment');
+    console.error('   - Trying to connect to localhost in a deployed environment (use a hosted MongoDB URI)');
+    console.error('   - MongoDB server not reachable due to network/firewall or IP access list');
+  }
+  if (err.name === 'MongooseServerSelectionError') {
+    console.error('🔎 Tip: Verify your MongoDB connection string, cluster host, and that the cluster allows incoming connections from your deployment environment.');
+  }
 });
 
 // Routes
@@ -123,9 +148,33 @@ app.get('/', (req, res) => {
   res.json({ message: 'Server is running', realtimeClients: clients.size });
 });
 
+// DEV: quick endpoint to test email delivery without creating a user
+if (process.env.NODE_ENV === 'development') {
+  const emailService = require('./services/emailService');
+  app.get('/__debug/send-test-email', async (req, res) => {
+    const to = (req.query.to || process.env.GMAIL_USER);
+    if (!to) return res.status(400).json({ success: false, message: 'Provide ?to=email to send test or set GMAIL_USER in .env' });
+    try {
+      await emailService.sendRegistrationEmail(to, 'DevTester');
+      res.json({ success: true, message: `Test email sent to ${to}` });
+    } catch (err) {
+      console.error('Test email failed:', err);
+      res.status(500).json({ success: false, message: 'Failed to send test email', error: err.message });
+    }
+  });
+}
+
 // Health check route
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', realtimeClients: clients.size });
+  // Include DB connection status for easier health monitoring
+  const dbStateMap = {
+    0: 'disconnected',
+    1: 'connected',
+    2: 'connecting',
+    3: 'disconnecting',
+  };
+  const dbState = (mongoose && mongoose.connection && mongoose.connection.readyState) || 0;
+  res.json({ status: 'OK', realtimeClients: clients.size, db: dbStateMap[dbState] || 'unknown' });
 });
 
 // Global error handler for JSON parsing errors

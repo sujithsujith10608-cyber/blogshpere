@@ -18,6 +18,10 @@ let transporter;
 
 // Check if Gmail credentials are available
 if (process.env.GMAIL_USER && process.env.GMAIL_PASSWORD) {
+  // Common mistake: pasted App Password with spaces. App passwords are 16 chars without spaces.
+  if (process.env.GMAIL_PASSWORD.includes(' ')) {
+    console.warn('⚠️  GMAIL_PASSWORD contains spaces — ensure you use a 16-character App Password without spaces.');
+  }
   try {
     // Create transporter for Gmail
     transporter = nodemailer.createTransport({

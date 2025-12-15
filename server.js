@@ -57,7 +57,7 @@ global.broadcastEvent = broadcastEvent;
 
 // MongoDB Connection
 // Prefer `MONGODB_URI` (common name) but accept `MONGO_URI` for compatibility
-const mongoURI = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/fb';
+const mongoURI = process.env.MONGODB_URI 
 
 // Helper to mask credentials when logging the connection host
 function maskMongoURI(uri) {

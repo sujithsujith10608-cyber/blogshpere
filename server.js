@@ -57,9 +57,41 @@ global.broadcastEvent = broadcastEvent;
 
 // MongoDB Connection
 // Prefer `MONGODB_URI` (common name) but accept `MONGO_URI` for compatibility
-const mongoURI = process.env.MONGODB_URI 
+const mongoURI = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/fb';
+
+const dns = require('dns').promises;
 
 // Helper to mask credentials when logging the connection host
+async function checkMongoSrvResolution(uri) {
+  try {
+    if (!uri || !uri.startsWith('mongodb+srv://')) {
+      console.log('Using non-SRV MongoDB URI (no SRV check)');
+      return true;
+    }
+    // Extract host (between 'mongodb+srv://' and the next '/') and strip userinfo
+    const host = uri.replace('mongodb+srv://', '').split('/')[0].split('@').pop();
+    const srvName = `_mongodb._tcp.${host}`;
+    console.log(`Checking SRV DNS for MongoDB cluster: ${srvName}`);
+    const records = await dns.resolveSrv(srvName);
+    if (!records || records.length === 0) {
+      throw new Error('No SRV records found');
+    }
+    console.log(`SRV records found for ${host}:`, records.map(r => `${r.name}:${r.port}`));
+    return true;
+  } catch (err) {
+    console.error('MongoDB SRV resolution failed:', err && err.message ? err.message : err);
+    console.error('⚠️  Troubleshooting tips:');
+    console.error('  - Ensure the `MONGODB_URI` in your deployment (Render) points to the correct Atlas cluster host.');
+    console.error('  - If your environment blocks SRV DNS lookups, use the non-SRV connection string (mongodb:// seed list) provided by Atlas.');
+    console.error('  - Verify Atlas Network Access allows connections from your host (or use 0.0.0.0/0 temporarily for testing).');
+    // In production-like environments fail fast so the deployment log shows the actual DNS error
+    if (process.env.NODE_ENV && process.env.NODE_ENV !== 'development') {
+      console.error('Exiting process due to SRV resolution failure to ensure deployment log surfaces the issue.');
+      process.exit(1);
+    }
+    return false;
+  }
+}
 function maskMongoURI(uri) {
   try {
     const url = new URL(uri.replace('mongodb+srv://', 'http://'));
@@ -72,27 +104,30 @@ function maskMongoURI(uri) {
 
 console.log(`Using MongoDB URI host: ${maskMongoURI(mongoURI)}`);
 
-mongoose.connect(mongoURI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => {
-  console.log('Connected to MongoDB successfully');
-})
-.catch((err) => {
-  console.error('MongoDB connection error:', err);
+(async () => {
+  await checkMongoSrvResolution(mongoURI);
 
-  // Helpful troubleshooting hints for common connectivity issues
-  if (err.message && err.message.includes('ECONNREFUSED')) {
-    console.error('⚠️  Connection refused to MongoDB. Possible causes:');
-    console.error('   - `MONGODB_URI` (or `MONGO_URI`) not set in environment');
-    console.error('   - Trying to connect to localhost in a deployed environment (use a hosted MongoDB URI)');
-    console.error('   - MongoDB server not reachable due to network/firewall or IP access list');
-  }
-  if (err.name === 'MongooseServerSelectionError') {
-    console.error('🔎 Tip: Verify your MongoDB connection string, cluster host, and that the cluster allows incoming connections from your deployment environment.');
-  }
-});
+  mongoose.connect(mongoURI)
+  .then(() => {
+    console.log('Connected to MongoDB successfully');
+  })
+  .catch((err) => {
+    console.error('MongoDB connection error:', err);
+
+    // Helpful troubleshooting hints for common connectivity issues
+    if (err.message && err.message.includes('ECONNREFUSED')) {
+      console.error('⚠️  Connection refused to MongoDB. Possible causes:');
+      console.error('   - `MONGODB_URI` (or `MONGO_URI`) not set in environment');
+      console.error('   - Trying to connect to localhost in a deployed environment (use a hosted MongoDB URI)');
+      console.error('   - MongoDB server not reachable due to network/firewall or IP access list');
+    }
+    if (err.name === 'MongooseServerSelectionError') {
+      console.error('🔎 Tip: Verify your MongoDB connection string, cluster host, and that the cluster allows incoming connections from your deployment environment.');
+    }
+    // If this is a production-like environment, exit so Render shows a failing deployment.
+    if (process.env.NODE_ENV && process.env.NODE_ENV !== 'development') process.exit(1);
+  });
+})();
 
 // Routes
 app.use('/api/users', userRoutes);
@@ -160,6 +195,24 @@ if (process.env.NODE_ENV === 'development') {
     } catch (err) {
       console.error('Test email failed:', err);
       res.status(500).json({ success: false, message: 'Failed to send test email', error: err.message });
+    }
+  });
+}
+
+// Debug route to inspect masked env values (enabled in dev or when ALLOW_DEBUG=true)
+const ALLOW_DEBUG = process.env.ALLOW_DEBUG === 'true' || process.env.NODE_ENV !== 'production';
+if (ALLOW_DEBUG) {
+  app.get('/__debug/env', (req, res) => {
+    try {
+      const maskedMongo = maskMongoURI(mongoURI || process.env.MONGODB_URI || process.env.MONGO_URI || '(none)');
+      const mailConfigured = !!(process.env.GMAIL_USER && process.env.GMAIL_PASSWORD);
+      res.json({
+        nodeEnv: process.env.NODE_ENV || 'not-set',
+        mongoHost: maskedMongo,
+        mailConfigured,
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to read environment', message: err.message });
     }
   });
 }

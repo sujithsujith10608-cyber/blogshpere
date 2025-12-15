@@ -1,190 +1,212 @@
 require('dotenv').config();
-
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
-const dns = require('dns').promises;
-const { EventEmitter } = require('events');
+
+// Import routes
+const userRoutes = require('./routes/userRoutes');
+const blogRoutes = require('./routes/blogRoutes');
+const llmRoutes = require('./routes/llmRoutes');
+const profileRoutes = require('./routes/profileRoutes');
+const recommendationRoutes = require('./routes/recommendationRoutes');
+const followSuggestionRoutes = require('./routes/followSuggestionRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
+const chatRoutes = require('./routes/chatRoutes');
 
 const app = express();
 
-/* =========================
-   CONFIG
-========================= */
-
-const PORT = process.env.PORT || 5000;
-const NODE_ENV = process.env.NODE_ENV || 'development';
-
-const MONGODB_URI =
-  process.env.MONGODB_URI ||
-  process.env.MONGO_URI ||
-  'mongodb://localhost:27017/fb';
-
-const CORS_ALLOWED_ORIGIN =
-  process.env.CORS_ORIGIN ||
-  process.env.FRONTEND_URL ||
-  'http://localhost:8080';
-
-/* =========================
-   MIDDLEWARE
-========================= */
-
+// Middleware
+// Allow configuring CORS via CORS_ORIGIN or FRONTEND_URL (fallback to Vite dev default 5173)
+const CORS_ALLOWED_ORIGIN = process.env.CORS_ORIGIN || process.env.FRONTEND_URL || 'http://localhost:8080';
 app.use(cors({
   origin: CORS_ALLOWED_ORIGIN,
   credentials: true,
 }));
-
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cookieParser());
 
-/* =========================
-   REAL-TIME (SSE)
-========================= */
+// Real-time event broadcast system
+const eventEmitter = new (require('events').EventEmitter)();
+const clients = new Set(); // Track connected SSE clients
 
-const eventEmitter = new EventEmitter();
-const clients = new Set();
-
-global.broadcastEvent = function (type, data) {
-  const payload = {
-    type,
-    data,
+// Broadcast event to all connected clients
+function broadcastEvent(eventType, data) {
+  const eventData = {
+    type: eventType,
+    data: data,
     timestamp: new Date().toISOString(),
   };
 
-  clients.forEach(res => {
+  // Send to all connected SSE clients
+  clients.forEach((clientResponse) => {
     try {
-      res.write(`data: ${JSON.stringify(payload)}\n\n`);
-    } catch {
-      clients.delete(res);
+      clientResponse.write(`data: ${JSON.stringify(eventData)}\n\n`);
+    } catch (error) {
+      console.error('Error broadcasting to client:', error.message);
+      clients.delete(clientResponse);
     }
   });
 
-  console.log(`📡 Event broadcasted: ${type}`);
-};
-
-/* =========================
-   MONGODB CONNECTION
-========================= */
-
-mongoose.set('strictQuery', true);
-
-function maskMongoURI(uri) {
-  return uri.replace(/:(?:[^@]+)@/, ':*****@');
+  console.log(`📡 Broadcasting event: ${eventType}`);
 }
 
-async function checkMongoSrv(uri) {
-  if (!uri.startsWith('mongodb+srv://')) return;
+// Make broadcastEvent globally available
+global.broadcastEvent = broadcastEvent;
 
-  const host = uri
-    .replace('mongodb+srv://', '')
-    .split('/')[0]
-    .split('@')
-    .pop();
+// MongoDB Connection
+// Prefer `MONGODB_URI` (common name) but accept `MONGO_URI` for compatibility
+const mongoURI = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/fb';
 
-  const srv = `_mongodb._tcp.${host}`;
-  const records = await dns.resolveSrv(srv);
+mongoose.connect(mongoURI)
+  .then(() => {
+    console.log('Connected to MongoDB successfully');
+  })
+  .catch((err) => {
+    console.error('MongoDB connection error:', err);
 
-  console.log(
-    `SRV records found for ${host}:`,
-    records.map(r => `${r.name}:${r.port}`)
-  );
-}
-
-(async () => {
-  try {
-    console.log(`🔌 Mongo URI: ${maskMongoURI(MONGODB_URI)}`);
-    await checkMongoSrv(MONGODB_URI);
-
-    await mongoose.connect(MONGODB_URI);
-    console.log('✅ MongoDB connected');
-  } catch (err) {
-    console.error('❌ MongoDB connection error:', err.message);
-
-    if (NODE_ENV !== 'development') {
-      process.exit(1);
+    // Helpful troubleshooting hints for common connectivity issues
+    if (err.message && err.message.includes('ECONNREFUSED')) {
+      console.error('⚠️  Connection refused to MongoDB. Possible causes:');
+      console.error('   - `MONGODB_URI` (or `MONGO_URI`) not set in environment');
+      console.error('   - Trying to connect to localhost in a deployed environment (use a hosted MongoDB URI)');
+      console.error('   - MongoDB server not reachable due to network/firewall or IP access list');
     }
-  }
-})();
-
-/* =========================
-   ROUTES
-========================= */
-
-app.get('/', (req, res) => {
-  res.json({
-    message: 'Server running',
-    env: NODE_ENV,
-    dbState: mongoose.connection.readyState,
-    realtimeClients: clients.size,
+    if (err.name === 'MongooseServerSelectionError') {
+      console.error('🔎 Tip: Verify your MongoDB connection string, cluster host, and that the cluster allows incoming connections from your deployment environment.');
+    }
+    // If this is a production-like environment, exit so Render shows a failing deployment.
+    if (process.env.NODE_ENV && process.env.NODE_ENV !== 'development') process.exit(1);
   });
-});
 
-/* ===== SSE ENDPOINT ===== */
+// Routes
+app.use('/api/users', userRoutes);
+app.use('/api/blogs', blogRoutes);
+app.use('/api/llm', llmRoutes);
+app.use('/api/profiles', profileRoutes);
+app.use('/api/recommendations', recommendationRoutes);
+app.use('/api/follow-suggestions', followSuggestionRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/chats', chatRoutes);
 
+// Real-time SSE endpoint
 app.get('/api/events/stream', (req, res) => {
+  // Set headers for Server-Sent Events
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', CORS_ALLOWED_ORIGIN);
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 
-  res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+  // Send initial connection message
+  res.write(`data: ${JSON.stringify({ type: 'connected', data: { message: 'Connected to real-time events' }, timestamp: new Date().toISOString() })}\n\n`);
 
+  // Add client to set
   clients.add(res);
-  console.log(`✅ SSE client connected (${clients.size})`);
+  console.log(`✅ Client connected. Total clients: ${clients.size}`);
 
+  // Send heartbeat to keep connection alive
   const heartbeat = setInterval(() => {
     try {
       res.write(': heartbeat\n\n');
-    } catch {
+    } catch (error) {
       clearInterval(heartbeat);
       clients.delete(res);
     }
-  }, 30000);
+  }, 30000); // Every 30 seconds
 
+  // Handle client disconnect
   req.on('close', () => {
     clearInterval(heartbeat);
     clients.delete(res);
-    console.log(`❌ SSE client disconnected (${clients.size})`);
+    console.log(`❌ Client disconnected. Total clients: ${clients.size}`);
+  });
+
+  req.on('error', () => {
+    clearInterval(heartbeat);
+    clients.delete(res);
   });
 });
 
-/* =========================
-   DEBUG (DEV ONLY)
-========================= */
+// Basic route
+app.get('/', (req, res) => {
+  res.json({ message: 'Server is running', realtimeClients: clients.size });
+});
 
-if (NODE_ENV !== 'production') {
-  app.get('/__debug/env', (req, res) => {
-    res.json({
-      nodeEnv: NODE_ENV,
-      mongoHost: maskMongoURI(MONGODB_URI),
-      corsOrigin: CORS_ALLOWED_ORIGIN,
-    });
+// DEV: quick endpoint to test email delivery without creating a user
+if (process.env.NODE_ENV === 'development') {
+  const emailService = require('./services/emailService');
+  app.get('/__debug/send-test-email', async (req, res) => {
+    const to = (req.query.to || process.env.GMAIL_USER);
+    if (!to) return res.status(400).json({ success: false, message: 'Provide ?to=email to send test or set GMAIL_USER in .env' });
+    try {
+      await emailService.sendRegistrationEmail(to, 'DevTester');
+      res.json({ success: true, message: `Test email sent to ${to}` });
+    } catch (err) {
+      console.error('Test email failed:', err);
+      res.status(500).json({ success: false, message: 'Failed to send test email', error: err.message });
+    }
   });
 }
 
-/* =========================
-   ERROR HANDLER
-========================= */
+// Debug route to inspect masked env values (enabled in dev or when ALLOW_DEBUG=true)
+const ALLOW_DEBUG = process.env.ALLOW_DEBUG === 'true' || process.env.NODE_ENV !== 'production';
+if (ALLOW_DEBUG) {
+  app.get('/__debug/env', (req, res) => {
+    try {
+      const maskedMongo = maskMongoURI(mongoURI || process.env.MONGODB_URI || process.env.MONGO_URI || '(none)');
+      const mailConfigured = !!(process.env.GMAIL_USER && process.env.GMAIL_PASSWORD);
+      res.json({
+        nodeEnv: process.env.NODE_ENV || 'not-set',
+        mongoHost: maskedMongo,
+        mailConfigured,
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to read environment', message: err.message });
+    }
+  });
+}
 
+// Health check route
+app.get('/health', (req, res) => {
+  // Include DB connection status for easier health monitoring
+  const dbStateMap = {
+    0: 'disconnected',
+    1: 'connected',
+    2: 'connecting',
+    3: 'disconnecting',
+  };
+  const dbState = (mongoose && mongoose.connection && mongoose.connection.readyState) || 0;
+  res.json({ status: 'OK', realtimeClients: clients.size, db: dbStateMap[dbState] || 'unknown' });
+});
+
+// Global error handler for JSON parsing errors
 app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    console.error('Invalid JSON received:', err.message);
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid JSON in request body',
+      error: err.message,
+    });
+  }
+  
   console.error('Server error:', err);
   res.status(500).json({
     success: false,
     message: 'Internal server error',
-    error: NODE_ENV === 'development' ? err.message : undefined,
+    error: process.env.NODE_ENV === 'development' ? err.message : 'Server error',
   });
 });
 
-/* =========================
-   START SERVER
-========================= */
+// Port configuration
+const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🌐 CORS origin: ${CORS_ALLOWED_ORIGIN}`);
+  console.log(`Server is running on port ${PORT}`);
+  console.log(`CORS allowed origin: ${CORS_ALLOWED_ORIGIN}`);
+  console.log(`📡 Real-time events endpoint: http://localhost:${PORT}/api/events/stream`);
 });
 
 module.exports = app;
